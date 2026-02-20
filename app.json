@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "Folio",
+    "slug": "folio",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "folio",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.yourname.folio"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#F7F6F3"
+      },
+      "package": "com.yourname.folio"
+    },
+   "plugins": ["expo-router", "expo-secure-store"],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
