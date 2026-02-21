@@ -81,9 +81,15 @@ Deno.serve(async (req) => {
     console.log("PDF downloaded");
 
     const bytes = new Uint8Array(await fileData.arrayBuffer());
-    const fullText = extractTextFromPdf(bytes);
-    console.log("Text extracted, length:", fullText.length);
-
+    const rawText = extractTextFromPdf(bytes);
+// Remove non-printable and problematic unicode characters
+const fullText = rawText
+  .replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, " ")
+  .replace(/\\u[0-9a-fA-F]{4}/g, " ")
+  .replace(/[^\x20-\x7E\s]/g, " ")
+  .replace(/\s+/g, " ")
+  .trim();
+console.log("Text extracted, length:", fullText.length);
     if (!fullText || fullText.length < 10) {
       throw new Error("Could not extract text from PDF — it may be scanned/image-based");
     }
@@ -112,9 +118,14 @@ Deno.serve(async (req) => {
       embedding: embeddings[i],
     }));
 
-    for (let i = 0; i < rows.length; i += 50) {
-      await supabase.from("chunks").insert(rows.slice(i, i + 50));
-    }
+   for (let i = 0; i < rows.length; i += 50) {
+  const { error: insertError } = await supabase.from("chunks").insert(rows.slice(i, i + 50));
+  if (insertError) {
+    console.error("Insert error:", JSON.stringify(insertError));
+    throw new Error(`Insert failed: ${insertError.message}`);
+  }
+  console.log(`Inserted batch ${i / 50 + 1}`);
+}
 
     await supabase.from("pdfs").update({ indexed: true, page_count: 1 }).eq("id", pdfId);
     console.log("Done! Indexed", rows.length, "chunks");
