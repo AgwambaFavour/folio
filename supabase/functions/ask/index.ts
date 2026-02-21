@@ -1,33 +1,48 @@
 // supabase/functions/ask/index.ts
-// Deploy with: supabase functions deploy ask
-// This keeps your Anthropic API key off the client device.
-
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const ANTHROPIC_KEY = Deno.env.get("ANTHROPIC_KEY")!;
+const VOYAGE_KEY = Deno.env.get("VOYAGE_KEY")!;
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SUPABASE_SERVICE_KEY = Deno.env.get("SERVICE_ROLE_KEY")!;
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+async function embedQuery(text: string): Promise<number[]> {
+  const res = await fetch("https://api.voyageai.com/v1/embeddings", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${VOYAGE_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "voyage-3-lite",
+      input: [text],
+    }),
+  });
+  const data = await res.json();
+  if (!data.data) throw new Error(`Voyage embedding failed: ${JSON.stringify(data)}`);
+  return data.data[0].embedding;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    // 1. Auth — verify the user's JWT
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader) return new Response("Unauthorized", { status: 401 });
+   const authHeader = req.headers.get("Authorization");
+if (!authHeader) return new Response("Unauthorized", { status: 401 });
 
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-    const { data: { user }, error: authError } = await supabase.auth.getUser(
-      authHeader.replace("Bearer ", "")
-    );
-    if (authError || !user) return new Response("Unauthorized", { status: 401 });
-
-    // 2. Parse request
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+const { data: { user }, error: authError } = await supabase.auth.getUser(
+  authHeader.replace("Bearer ", "")
+);
+if (!user) {
+  console.log("Auth error:", authError);
+  return new Response("Unauthorized", { status: 401 });
+}
     const { question, channelId, useWebSearch, messageHistory } = await req.json() as {
       question: string;
       channelId: string;
@@ -35,19 +50,10 @@ Deno.serve(async (req) => {
       messageHistory: Array<{ role: string; content: string }>;
     };
 
-    // 3. Embed the question
-    const embedRes = await fetch("https://api.openai.com/v1/embeddings", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${Deno.env.get("OPENAI_KEY")}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ model: "text-embedding-3-small", input: question }),
-    });
-    const embedData = await embedRes.json();
-    const queryEmbedding = embedData.data[0].embedding;
+    // Embed the question with Voyage AI
+    const queryEmbedding = await embedQuery(question);
 
-    // 4. Retrieve top-k relevant chunks
+    // Retrieve top-k relevant chunks
     const { data: chunks, error: chunkError } = await supabase.rpc("match_chunks", {
       query_embedding: queryEmbedding,
       match_channel_id: channelId,
@@ -59,7 +65,6 @@ Deno.serve(async (req) => {
 
     const hasRelevantChunks = chunks && chunks.length > 0 && chunks[0].similarity > 0.5;
 
-    // 5. Build context for Claude
     let contextBlock = "";
     let topSource = null;
 
@@ -84,9 +89,8 @@ Rules:
 - Be concise but thorough. Use markdown formatting (bold, bullet points) where helpful.
 - If the PDFs don't contain the answer and web search is off, say so clearly and offer what you know.
 - Never make up citations — only cite PDFs that were actually provided above.
-- Keep mathematical notation readable (e.g. use plain text like F(x), integral, etc. for equations).`;
+- Keep mathematical notation readable.`;
 
-    // 6. Call Anthropic Claude
     const tools = useWebSearch && !hasRelevantChunks ? [{
       type: "web_search_20250305",
       name: "web_search",
@@ -109,7 +113,6 @@ Rules:
         "x-api-key": ANTHROPIC_KEY,
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
-        ...(tools.length ? { "anthropic-beta": "interleaved-thinking-2025-05-14" } : {}),
       },
       body: JSON.stringify(anthropicBody),
     });
@@ -122,7 +125,6 @@ Rules:
 
     const webWasUsed = claudeData.content.some((b: any) => b.type === "tool_use");
 
-    // 7. Save both messages to DB
     await supabase.from("messages").insert([
       { channel_id: channelId, user_id: user.id, role: "user", content: question, web_used: false },
       {

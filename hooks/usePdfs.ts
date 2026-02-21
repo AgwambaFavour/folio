@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import * as DocumentPicker from "expo-document-picker";
-import * as FileSystem from "expo-file-system";
+import { readAsStringAsync } from "expo-file-system/legacy";
 import { decode } from "base64-arraybuffer";
 import { supabase } from "@/lib/supabase";
 import { Pdf } from "@/types";
@@ -25,38 +25,51 @@ export function usePdfs(channelId: string) {
     setLoading(false);
   }, [user, channelId]);
 
-  const pickAndUpload = async () => {
-    if (!user || !session) return;
+const pickAndUpload = async () => {
+  if (!user || !session) {
+    console.log("No user or session");
+    return;
+  }
 
-    // Let user pick a PDF
-    const result = await DocumentPicker.getDocumentAsync({
-      type: "application/pdf",
-      copyToCacheDirectory: true,
-    });
+  const result = await DocumentPicker.getDocumentAsync({
+    type: "application/pdf",
+    copyToCacheDirectory: true,
+  });
 
-    if (result.canceled || !result.assets[0]) return;
-    const file = result.assets[0];
+  if (result.canceled) return;
+  const file = result.assets?.[0];
+  if (!file?.uri) throw new Error("Could not get file URI");
+  
+  console.log("File picked:", file.name, file.uri);
+  setUploading(true);
+  setUploadProgress(0);
 
-    setUploading(true);
-    setUploadProgress(0);
+  try {
+    const base64 = await readAsStringAsync(file.uri, {
+      encoding: "base64",
+    }).catch((e) => { console.log("Read error:", e); return null; });
 
-    try {
-      // Read as base64
-      const base64 = await FileSystem.readAsStringAsync(file.uri, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-      const arrayBuffer = decode(base64);
+    if (!base64) throw new Error("Could not read file");
+    console.log("Base64 length:", base64.length);
 
-      // Upload to Supabase Storage: pdfs/{userId}/{uuid}.pdf
-      const storagePath = `${user.id}/${Date.now()}-${file.name}`;
-      setUploadProgress(30);
+    const arrayBuffer = decode(base64);
+    console.log("ArrayBuffer size:", arrayBuffer.byteLength);
 
-      const { error: storageError } = await supabase.storage
-        .from("pdfs")
-        .upload(storagePath, arrayBuffer, { contentType: "application/pdf" });
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+const storagePath = `${user.id}/${Date.now()}-${safeName}`;
+    console.log("Uploading to:", storagePath);
 
-      if (storageError) throw storageError;
-      setUploadProgress(60);
+    const { error: storageError } = await supabase.storage
+      .from("pdfs")
+      .upload(storagePath, arrayBuffer, { contentType: "application/pdf" });
+
+    if (storageError) {
+      console.log("Storage error:", JSON.stringify(storageError));
+      throw storageError;
+    }
+    
+    console.log("Upload success!");
+  
 
       // Insert PDF record
       const { data: pdfRecord, error: dbError } = await supabase
@@ -76,16 +89,29 @@ export function usePdfs(channelId: string) {
       setUploadProgress(80);
 
       // Trigger indexing Edge Function
-      const { data: { session: currentSession } } = await supabase.auth.getSession();
-      await fetch(`${process.env.EXPO_PUBLIC_SUPABASE_URL}/functions/v1/ingest-pdf`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${currentSession?.access_token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ pdfId: pdfRecord.id }),
-      });
+      console.log("Triggering ingest-pdf...");
+const { data: { session: currentSession } } = await supabase.auth.getSession();
+console.log("Session token:", currentSession?.access_token ? "exists" : "missing");
+console.log("PDF record ID:", pdfRecord.id);
+const ingestRes = await fetch(`${process.env.EXPO_PUBLIC_SUPABASE_URL}/functions/v1/ingest-pdf`, {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${currentSession?.access_token}`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ pdfId: pdfRecord.id }),
+});
+console.log("Ingest response:", ingestRes.status);
 
+// Wait 5 seconds then refetch to show updated status
+setTimeout(() => {
+  fetchPdfs();
+}, 5000);
+
+// Also refetch after 15 seconds in case indexing takes longer
+setTimeout(() => {
+  fetchPdfs();
+}, 15000);
       setUploadProgress(100);
       setPdfs((prev) => [pdfRecord, ...prev]);
 
